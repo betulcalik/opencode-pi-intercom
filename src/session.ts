@@ -83,7 +83,7 @@ export class SessionBridge {
     }
   }
 
-  async resolveTargetSession(): Promise<string> {
+  async resolveTargetSession(senderLabel?: string): Promise<string> {
     if (this.cfg.sessionID) return this.cfg.sessionID;
     if (this.currentSessionId) return this.currentSessionId;
     const sessions = unwrap(await this.client.session?.list?.());
@@ -95,12 +95,14 @@ export class SessionBridge {
         return id;
       }
     }
-    const created = unwrap(await this.client.session?.create?.({ body: { title: "intercom" } }));
+    const created = unwrap(await this.client.session?.create?.({ body: { title: senderLabel ? `intercom ← ${senderLabel}` : "intercom" } }));
     const createdId = entryId(created);
     if (!createdId) {
       throw new Error("could not resolve or create an OpenCode session for intercom injection");
     }
     this.currentSessionId = createdId;
+    const via = senderLabel ? ` for inbound from ${senderLabel}` : "";
+    this.log(`no live session found — created fallback session ${createdId}${via}; pin a target with "sessionID" in ~/.config/opencode/intercom.json`);
     return createdId;
   }
 

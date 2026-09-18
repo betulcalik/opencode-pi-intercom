@@ -60,6 +60,16 @@ export interface SessionInfo {
   contextTokens?: number;
   contextWindow?: number;
   tmuxPane?: string;
+  /** Harness this session runs on ("pi" | "omp" | "opencode"). Additive;
+   *  older peers simply ignore it. */
+  harness?: string;
+  /** Delivery capabilities advertised by the session. Absent on older clients. */
+  capabilities?: {
+    steer?: boolean;
+    ask?: boolean;
+    ui?: boolean;
+    attachments?: boolean;
+  };
 }
 
 export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "peerUid" | "trustedLocal">;

@@ -68,6 +68,8 @@ export function startIntercom(deps: IntercomDeps): StartedIntercom {
     lastActivity,
     name: cfg.name,
     status: statusLabel,
+    harness: "opencode",
+    capabilities: { steer: false, ask: true, ui: false, attachments: false },
   });
 
   const setPresenceStatus = (label: string) => {
@@ -111,7 +113,7 @@ export function startIntercom(deps: IntercomDeps): StartedIntercom {
     const trigger = cfg.inboundTrigger === "always" || (cfg.inboundTrigger === "replies" && wantsReply);
     const text = formatInboundPrompt(from, message);
     try {
-      const sessionID = await bridge.resolveTargetSession();
+      const sessionID = await bridge.resolveTargetSession(from.name ?? from.id.slice(0, 8));
       // Snapshot before injection so auto-reply only ever sends text produced
       // AFTER this ask, never a stale assistant message.
       const preInject = wantsReply ? await bridge.lastAssistantText(sessionID).catch(() => null) : null;
@@ -220,8 +222,11 @@ export function startIntercom(deps: IntercomDeps): StartedIntercom {
           if (others.length === 0) return "No other intercom sessions connected.";
           return others
             .map(
-              (s) =>
-                `• ${s.name ?? s.id.slice(0, 8)} (${s.id.slice(0, 8)}) — ${s.cwd} (${s.model}${s.status ? ` · ${s.status}` : ""})`,
+              (s) => {
+                const badge = s.harness ? `[${s.harness === "opencode" ? "oc" : s.harness}] ` : "";
+                const steerNote = s.capabilities?.steer === false ? " · queues (no steer)" : "";
+                return `• ${badge}${s.name ?? s.id.slice(0, 8)} (${s.id.slice(0, 8)}) — ${s.cwd} (${s.model}${s.status ? ` · ${s.status}` : ""}${steerNote})`;
+              },
             )
             .join("\n");
         }
