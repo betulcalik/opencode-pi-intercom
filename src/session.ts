@@ -15,6 +15,9 @@ export interface SdkClient {
   config?: {
     providers?: () => Promise<unknown>;
   };
+  app?: {
+    log?: (args: unknown) => Promise<unknown>;
+  };
 }
 
 function unwrap(response: unknown): unknown {

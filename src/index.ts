@@ -331,16 +331,26 @@ export const IntercomPlugin = async (ctx: PluginContext) => {
   initializedInProcess = true;
 
   const cfg = loadConfig();
+
+  // Plugin ctx is untyped; SessionBridge narrows every SDK access at runtime.
+  const sdk = (typeof ctx.client === "object" && ctx.client !== null ? ctx.client : {}) as SdkClient;
   const log = (...args: unknown[]) => {
-    console.error("[opencode-pi-intercom]", ...args);
+    const message = args.map(String).join(" ");
+    // Route through the OpenCode server log so plugin output never spams the TUI
+    // (console.error renders as red text over the input area). Fall back to
+    // stderr if the SDK shape drifts.
+    const entry = sdk.app?.log?.({ body: { service: "opencode-pi-intercom", level: "info", message } });
+    if (entry) {
+      entry.catch(() => console.error("[opencode-pi-intercom]", message));
+    } else {
+      console.error("[opencode-pi-intercom]", message);
+    }
   };
   if (!cfg.enabled) {
     log("disabled by config");
     return {};
   }
 
-  // Plugin ctx is untyped; SessionBridge narrows every SDK access at runtime.
-  const sdk = (typeof ctx.client === "object" && ctx.client !== null ? ctx.client : {}) as SdkClient;
   const started = startIntercom({ cfg, sdk, cwd: ctx.directory ?? process.cwd(), log });
 
   const shutdown = () => started.stop();
