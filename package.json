@@ -1,6 +1,6 @@
 {
   "name": "opencode-pi-intercom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode plugin: peer with omp-intercom / pi-intercom broker sessions for agentic messaging (send/ask/reply/list).",
   "type": "module",
   "license": "MIT",
