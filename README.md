@@ -26,26 +26,52 @@ orchestration on one machine.
 
 ## Install
 
-Requires the official OpenCode CLI ≥ 1.18 (`bun add -g opencode-ai`) and an
-existing omp-intercom setup (the broker belongs to it — this plugin reuses it
-and never ships its own copy).
+Works with **OpenCode V2** (`plugins` key) and **OpenCode V1 ≥ 1.18.29**
+(`plugin` key) from the same package — the entrypoint default-exports both a
+V2 `setup()` definition and a V1 `server()` function, and each runtime picks
+its own. Requires an existing omp-intercom setup (the broker belongs to it —
+this plugin reuses it and never ships its own copy).
 
 Package: [opencode-pi-intercom on npm](https://www.npmjs.com/package/opencode-pi-intercom)
 
 ```jsonc
-// ~/.config/opencode/opencode.json (or opencode.jsonc, or .opencode/opencode.json)
+// OpenCode V2 — ~/.config/opencode/opencode.json(c) or .opencode/opencode.json(c)
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-pi-intercom"]
+}
+```
+
+```jsonc
+// OpenCode V1 (≥ 1.18.29) — same files, legacy key
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": ["opencode-pi-intercom"]
 }
 ```
 
-OpenCode bun-installs the package (and its `@opencode-ai/plugin` dependency)
-automatically at startup. On first instance init the plugin connects and logs:
+OpenCode bun-installs the package automatically at startup. On first instance
+init the plugin connects and logs:
 
 ```
 [opencode-pi-intercom] connected to broker as "opencode" (session …)
 ```
+
+### V2 differences
+
+- The `intercom` tool is registered via `ctx.tool.transform` with plain JSON
+  Schema — the `@opencode-ai/plugin` helper is only used on the V1 path.
+- `inboundTrigger: "never"` (context-only injection) maps to V2 **synthetic
+  messages** instead of a `noReply` prompt body.
+- `bridgeModel` calls `ctx.session.switchModel` before an injected prompt, so
+  it **switches the session model persistently** (V1 applied it per request).
+- Plugin logs go to `console` (the V2-documented path) instead of
+  `client.app.log`.
+- V2 stream events are normalized before reaching the session bridge:
+  `session.execution.started`/`succeeded`/`failed`/`cancelled` drive presence
+  (`thinking`/`idle`) and auto-reply, and `session.step.started` carries the
+  live model label (V1 used `session.idle`, `session.status`, and
+  `message.updated`).
 
 ## Quick start
 
@@ -166,13 +192,14 @@ Env overrides: `OPENCODE_INTERCOM_ENABLED`, `OPENCODE_INTERCOM_NAME`,
 ## Testing
 
 ```bash
-bun test   # 45 tests, green
+bun test   # 52 tests, green
 ```
 
 | Suite | Covers |
 | --- | --- |
 | Unit | framing (split/oversize/malformed frames), protocol guard, paths, config precedence |
 | Session bridge | target-session resolution, injection bodies, assistant-text extraction, event mapping |
+| V2 adapter | `ctx.session.prompt`/`synthetic`/`switchModel` mapping, `{ data }` envelopes, model label via `ctx.model.default()`, tool registration + input narrowing, event subscription cleanup |
 | Client ↔ fake broker | register, send/ack, ask resolve/timeout + `cancel_ask`, receipts, presence, liveness + half-open detection |
 | Real-broker integration | roster, ask round-trip, receipt chain, fail-closed sends, mailbox redelivery |
 | Hub full loop | inbound ask → injection → simulated run → auto-reply; staleness guard; `noReply`; tool actions; no re-inject of own ask replies |
@@ -182,7 +209,7 @@ Integration suites auto-skip without the real broker source; point
 
 ## Troubleshooting
 
-- **`intercom tool disabled` in logs** — `@opencode-ai/plugin` did not resolve; for local installs add `~/.config/opencode/package.json` with `{ "dependencies": { "@opencode-ai/plugin": "^1.18.31" } }`.
+- **`intercom tool disabled` in logs (V1 only)** — `@opencode-ai/plugin` did not resolve; for local installs add `~/.config/opencode/package.json` with `{ "dependencies": { "@opencode-ai/plugin": "^1.18.31" } }`. The V2 path registers the tool without that package.
 - **Asks stall** — the target session is busy with a long agent run; injected prompts queue behind it. Wait, `POST /session/:id/abort`, or set `sessionID` to a dedicated session.
 - **Ambiguous sends** — two instances registered with the same `name` fail closed. Give each instance a unique `name` (or `OPENCODE_INTERCOM_NAME`); use unique `PEER_NAME`s for test peers.
 - **No plugin load in serve mode** — Open Design's embedded opencode dev builds skip config plugins in serve mode and are rejected by the Zen free tier; use the official CLI.
@@ -196,10 +223,16 @@ bun test        # full suite
 bun build src/index.ts --target=bun --outfile /dev/null   # syntax gate
 ```
 
-Local install for iterating: copy the checkout to
-`~/.config/opencode/plugins/opencode-pi-intercom` and point the config
-`"plugin"` entry at `./plugins/opencode-pi-intercom.ts` re-exporting
-`IntercomPlugin`.
+Local install for iterating (V2): drop a re-exporting file into a discovered
+plugins directory —
+
+```bash
+echo 'export { default } from "/path/to/opencode-pi-intercom/src/index.ts";' \
+  > ~/.config/opencode/plugins/pi-intercom.ts
+```
+
+For V1, point the config `"plugin"` entry at
+`./plugins/opencode-pi-intercom.ts` re-exporting `IntercomPlugin` instead.
 
 Release flow: change → `bun test` → version bump → commit → `git push` →
 `npm publish`.
