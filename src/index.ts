@@ -13,8 +13,11 @@ import { IntercomClient } from "./client.ts";
 import { SessionBridge } from "./session.ts";
 import type { SdkClient } from "./session.ts";
 import { formatInboundPrompt } from "./format.ts";
-import { makeIntercomTool } from "./tool.ts";
+import { makeIntercomTool, narrowToolArgs } from "./tool.ts";
+import { INTERCOM_TOOL_DESCRIPTION, INTERCOM_TOOL_INPUT_SCHEMA } from "./tool.ts";
 import type { IntercomToolArgs } from "./tool.ts";
+import { makeV2Sdk } from "./v2.ts";
+import type { V2PluginContext } from "./v2.ts";
 import type { Message, SessionInfo, SessionRegistration } from "./protocol.ts";
 
 interface PendingInboundAsk {
@@ -329,6 +332,79 @@ interface PluginContext {
 // per process; only the first factory run may own the broker connection.
 let initializedInProcess = false;
 
+/**
+ * V2 plugin setup (OpenCode V2, @opencode/plugin context). Unguarded core so
+ * tests can run it repeatedly; the default export wraps it with the singleton
+ * guard. Returns the cleanup function OpenCode calls on unload.
+ */
+export const setupV2Intercom = async (ctx: V2PluginContext): Promise<(() => void) | undefined> => {
+  const cfg = loadConfig();
+
+  // V2 has no server-log client on the plugin context; console is the
+  // documented logging path for V2 plugins.
+  const log = (...args: unknown[]) => {
+    console.log("[opencode-pi-intercom]", ...args.map(String));
+  };
+  if (!cfg.enabled) {
+    log("disabled by config");
+    return undefined;
+  }
+
+  const sdk = makeV2Sdk(ctx, cfg, log);
+  const started = startIntercom({ cfg, sdk, cwd: ctx.location?.directory ?? process.cwd(), log });
+
+  // Agent-facing `intercom` tool — plain JSON Schema input in V2, no helper
+  // package needed (the V1 dynamic @opencode-ai/plugin import is skipped).
+  await ctx.tool?.transform?.((editor) => {
+    editor.add({
+      name: "intercom",
+      description: INTERCOM_TOOL_DESCRIPTION,
+      input: INTERCOM_TOOL_INPUT_SCHEMA,
+      execute: async (input: unknown) => {
+        const parsed = narrowToolArgs(input);
+        if (!parsed.ok) return { content: parsed.error };
+        return { content: await started.hub.handleTool(parsed.args) };
+      },
+    });
+  });
+
+  // Presence: tool activity → roster status (`tool:<name>` / `thinking`).
+  await ctx.tool?.hook?.("execute.before", (event) =>
+    started.hooks["tool.execute.before"]({ tool: event.tool }),
+  );
+  await ctx.tool?.hook?.("execute.after", () => started.hooks["tool.execute.after"]());
+
+  // Public event stream → session tracking (idle / status / live model label).
+  const controller = new AbortController();
+  if (ctx.event?.subscribe) {
+    const subscribe = ctx.event.subscribe;
+    void (async () => {
+      try {
+        for await (const event of subscribe.call(ctx.event, { signal: controller.signal })) {
+          await started.hooks.event({ event: { type: event.type, properties: event.properties } });
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) log(`event subscription ended: ${String(error)}`);
+      }
+    })();
+  } else {
+    log("ctx.event.subscribe unavailable — auto-reply and presence will not track session state");
+  }
+
+  const shutdown = () => started.stop();
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  process.once("beforeExit", shutdown);
+
+  return () => {
+    controller.abort();
+    process.off("SIGINT", shutdown);
+    process.off("SIGTERM", shutdown);
+    process.off("beforeExit", shutdown);
+    started.stop();
+  };
+};
+
 export const IntercomPlugin = async (ctx: PluginContext) => {
   if (initializedInProcess) {
     return {};
@@ -370,4 +446,21 @@ export const IntercomPlugin = async (ctx: PluginContext) => {
     "tool.execute.before": started.hooks["tool.execute.before"],
     "tool.execute.after": started.hooks["tool.execute.after"],
   };
+};
+
+/**
+ * Dual V1+V2 entrypoint. V2 reads the default export's `id` + `setup()`; V1
+ * (≥ 1.18.29) calls `server()`; older V1 releases fall back to the named
+ * `IntercomPlugin` export above. A plain object is used instead of
+ * `Plugin.define()` so the module has no @opencode/plugin runtime import —
+ * an unresolvable V2 package can never break the V1 path.
+ */
+export default {
+  id: "opencode.pi-intercom",
+  async setup(ctx: V2PluginContext) {
+    if (initializedInProcess) return undefined;
+    initializedInProcess = true;
+    return setupV2Intercom(ctx);
+  },
+  server: IntercomPlugin,
 };
