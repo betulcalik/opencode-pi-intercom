@@ -75,6 +75,10 @@ function pickPromptText(args: unknown): string {
  * Build an SdkClient over the V2 context. Missing methods are simply omitted —
  * SessionBridge already degrades gracefully (e.g. no `list` → creates a
  * fallback session; no `messages` → auto-reply stays silent).
+ *
+ * Verified against OpenCode v2.0.16: the plugin context exposes no
+ * `session.list`, and `ctx.model.default()` returns a `{ location, data }`
+ * envelope whose `data` carries the Model.Info.
  */
 export function makeV2Sdk(
   ctx: V2PluginContext,
@@ -140,7 +144,8 @@ export function makeV2Sdk(
     },
     config: {
       providers: async () => {
-        const selected = asRecord(await ctx.model?.default?.());
+        const result = asRecord(await ctx.model?.default?.());
+        const selected = asRecord(result?.data) ?? result;
         const providerID = typeof selected?.providerID === "string" ? selected.providerID : null;
         const modelID = typeof selected?.modelID === "string" ? selected.modelID : null;
         return { data: { default: providerID && modelID ? { build: `${providerID}/${modelID}` } : {} } };
@@ -150,4 +155,58 @@ export function makeV2Sdk(
     // SessionBridge never touches this branch.
     app: {},
   };
+}
+
+/**
+ * Normalize a V2 event-stream entry into one or more legacy-shaped events that
+ * SessionBridge.trackEvent understands. Verified against OpenCode v2.0.16:
+ *
+ * - V2 events carry their payload under `data` (not V1's `properties`).
+ * - V1's `session.idle` does not exist; execution ends with
+ *   `session.execution.succeeded` / `.failed` / `.cancelled`.
+ * - V1's `session.status` does not exist; `session.execution.started` marks a
+ *   run start, the end events above mark its finish.
+ * - V1's `message.updated` (with `info.providerID/modelID`) does not exist;
+ *   the live model rides on `session.step.started` (`data.model`).
+ *
+ * One V2 event can expand into several legacy events (e.g. a finished run is
+ * both "status idle" and "session.idle" for the auto-reply path).
+ */
+export function normalizeV2Event(event: {
+  type?: unknown;
+  data?: unknown;
+  properties?: unknown;
+}): Array<{ type: string; properties: unknown }> {
+  const type = typeof event.type === "string" ? event.type : "";
+  if (!type) return [];
+  const data = asRecord(event.data) ?? asRecord(event.properties);
+  const sessionID = typeof data?.sessionID === "string" ? data.sessionID : null;
+
+  switch (type) {
+    case "session.execution.started":
+      return sessionID
+        ? [{ type: "session.status", properties: { sessionID, status: "busy" } }]
+        : [];
+    case "session.execution.succeeded":
+    case "session.execution.failed":
+    case "session.execution.cancelled":
+      return sessionID
+        ? [
+            { type: "session.status", properties: { sessionID, status: "idle" } },
+            { type: "session.idle", properties: { sessionID } },
+          ]
+        : [];
+    case "session.step.started": {
+      const model = asRecord(data?.model);
+      const providerID = typeof model?.providerID === "string" ? model.providerID : null;
+      const modelID = typeof model?.id === "string" ? model.id : null;
+      if (!sessionID || !providerID || !modelID) return [{ type, properties: data }];
+      // message.* prefix also feeds the bridge's current-session tracking.
+      return [
+        { type: "message.updated", properties: { sessionID, info: { providerID, modelID } } },
+      ];
+    }
+    default:
+      return [{ type, properties: data }];
+  }
 }

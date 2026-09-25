@@ -16,7 +16,7 @@ import { formatInboundPrompt } from "./format.ts";
 import { makeIntercomTool, narrowToolArgs } from "./tool.ts";
 import { INTERCOM_TOOL_DESCRIPTION, INTERCOM_TOOL_INPUT_SCHEMA } from "./tool.ts";
 import type { IntercomToolArgs } from "./tool.ts";
-import { makeV2Sdk } from "./v2.ts";
+import { makeV2Sdk, normalizeV2Event } from "./v2.ts";
 import type { V2PluginContext } from "./v2.ts";
 import type { Message, SessionInfo, SessionRegistration } from "./protocol.ts";
 
@@ -353,9 +353,13 @@ export const setupV2Intercom = async (ctx: V2PluginContext): Promise<(() => void
   const sdk = makeV2Sdk(ctx, cfg, log);
   const started = startIntercom({ cfg, sdk, cwd: ctx.location?.directory ?? process.cwd(), log });
 
+  // Registrations are disposed by OpenCode on plugin unload, but our cleanup
+  // can also run standalone (reloads), so dispose them explicitly.
+  const registrations: Array<{ dispose?: () => Promise<unknown> }> = [];
+
   // Agent-facing `intercom` tool — plain JSON Schema input in V2, no helper
   // package needed (the V1 dynamic @opencode-ai/plugin import is skipped).
-  await ctx.tool?.transform?.((editor) => {
+  const toolRegistration = await ctx.tool?.transform?.((editor) => {
     editor.add({
       name: "intercom",
       description: INTERCOM_TOOL_DESCRIPTION,
@@ -367,21 +371,28 @@ export const setupV2Intercom = async (ctx: V2PluginContext): Promise<(() => void
       },
     });
   });
+  if (toolRegistration) registrations.push(toolRegistration as { dispose?: () => Promise<unknown> });
 
   // Presence: tool activity → roster status (`tool:<name>` / `thinking`).
-  await ctx.tool?.hook?.("execute.before", (event) =>
+  const beforeReg = await ctx.tool?.hook?.("execute.before", (event) =>
     started.hooks["tool.execute.before"]({ tool: event.tool }),
   );
-  await ctx.tool?.hook?.("execute.after", () => started.hooks["tool.execute.after"]());
+  if (beforeReg) registrations.push(beforeReg as { dispose?: () => Promise<unknown> });
+  const afterReg = await ctx.tool?.hook?.("execute.after", () => started.hooks["tool.execute.after"]());
+  if (afterReg) registrations.push(afterReg as { dispose?: () => Promise<unknown> });
 
   // Public event stream → session tracking (idle / status / live model label).
+  // V2 events use a different envelope (`data`) and lifecycle names
+  // (`session.execution.*`); normalize them before the V1-shaped hook.
   const controller = new AbortController();
   if (ctx.event?.subscribe) {
     const subscribe = ctx.event.subscribe;
     void (async () => {
       try {
         for await (const event of subscribe.call(ctx.event, { signal: controller.signal })) {
-          await started.hooks.event({ event: { type: event.type, properties: event.properties } });
+          for (const normalized of normalizeV2Event(event)) {
+            await started.hooks.event({ event: normalized });
+          }
         }
       } catch (error) {
         if (!controller.signal.aborted) log(`event subscription ended: ${String(error)}`);
@@ -402,6 +413,9 @@ export const setupV2Intercom = async (ctx: V2PluginContext): Promise<(() => void
     process.off("SIGTERM", shutdown);
     process.off("beforeExit", shutdown);
     started.stop();
+    for (const registration of registrations) {
+      void registration.dispose?.()?.catch(() => {});
+    }
   };
 };
 
@@ -460,7 +474,27 @@ export default {
   async setup(ctx: V2PluginContext) {
     if (initializedInProcess) return undefined;
     initializedInProcess = true;
-    return setupV2Intercom(ctx);
+    let cleanup: (() => void) | undefined;
+    try {
+      cleanup = await setupV2Intercom(ctx);
+    } catch (error) {
+      initializedInProcess = false;
+      throw error;
+    }
+    if (!cleanup) {
+      // Disabled by config — do not block a later reload from enabling it.
+      initializedInProcess = false;
+      return undefined;
+    }
+    // OpenCode reloads plugins in the same process (watched config dirs);
+    // release the guard on unload so the next setup can reinitialize.
+    return () => {
+      try {
+        cleanup();
+      } finally {
+        initializedInProcess = false;
+      }
+    };
   },
   server: IntercomPlugin,
 };

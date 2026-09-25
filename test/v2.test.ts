@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { makeV2Sdk } from "../src/v2.ts";
+import { makeV2Sdk, normalizeV2Event } from "../src/v2.ts";
 import type { V2PluginContext } from "../src/v2.ts";
 import { setupV2Intercom } from "../src/index.ts";
 import type { IntercomPluginConfig } from "../src/config.ts";
@@ -70,13 +70,15 @@ function makeFakeCtx(events?: AsyncIterable<{ type: string; properties?: unknown
         calls.switchModels.push(input);
       },
     },
-    model: { default: async () => ({ providerID: "opencode", modelID: "muse-spark-1.3" }) },
+    model: { default: async () => ({ data: { providerID: "opencode", modelID: "muse-spark-1.3" } }) },
     tool: {
       transform: async (callback) => {
         callback({ add: (tool) => calls.tools.push(tool as V2Calls["tools"][number]) });
+        return { dispose: async () => {} };
       },
       hook: async (name, callback) => {
         calls.hooks.push({ name, callback });
+        return { dispose: async () => {} };
       },
     },
     event: events ? { subscribe: () => events } : undefined,
@@ -143,7 +145,7 @@ describe("makeV2Sdk", () => {
     expect(messages.data).toHaveLength(2);
   });
 
-  test("model label comes from ctx.model.default()", async () => {
+  test("model label comes from ctx.model.default() (unwraps the { data } envelope)", async () => {
     const { ctx } = makeFakeCtx();
     const sdk = makeV2Sdk(ctx, makeCfg(agentDir), () => {});
     const providers = (await sdk.config?.providers?.()) as {
@@ -157,6 +159,62 @@ describe("makeV2Sdk", () => {
     delete ctx.session?.list;
     const sdk = makeV2Sdk(ctx, makeCfg(agentDir), () => {});
     expect(sdk.session?.list).toBeUndefined();
+  });
+});
+
+describe("normalizeV2Event", () => {
+  // Shapes captured from a live OpenCode v2.0.16 event stream (see PR #3).
+
+  test("session.execution.succeeded expands to status-idle + session.idle (auto-reply trigger)", () => {
+    const out = normalizeV2Event({
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses_1" },
+    });
+    expect(out).toEqual([
+      { type: "session.status", properties: { sessionID: "ses_1", status: "idle" } },
+      { type: "session.idle", properties: { sessionID: "ses_1" } },
+    ]);
+  });
+
+  test("session.execution.failed/cancelled also read as idle", () => {
+    for (const type of ["session.execution.failed", "session.execution.cancelled"]) {
+      const out = normalizeV2Event({ type, data: { sessionID: "ses_1" } });
+      expect(out.map((e) => e.type)).toEqual(["session.status", "session.idle"]);
+    }
+  });
+
+  test("session.execution.started reads as busy (presence: thinking)", () => {
+    const out = normalizeV2Event({ type: "session.execution.started", data: { sessionID: "ses_1" } });
+    expect(out).toEqual([{ type: "session.status", properties: { sessionID: "ses_1", status: "busy" } }]);
+  });
+
+  test("session.step.started carries the live model as message.updated", () => {
+    const out = normalizeV2Event({
+      type: "session.step.started",
+      data: { sessionID: "ses_1", model: { providerID: "opencode", id: "muse-spark-1.3" } },
+    });
+    expect(out).toEqual([
+      {
+        type: "message.updated",
+        properties: { sessionID: "ses_1", info: { providerID: "opencode", modelID: "muse-spark-1.3" } },
+      },
+    ]);
+  });
+
+  test("other events pass through with data as properties", () => {
+    const out = normalizeV2Event({
+      type: "session.inbox.enqueued",
+      data: { sessionID: "ses_1", inboxID: "msg_1" },
+    });
+    expect(out).toEqual([
+      { type: "session.inbox.enqueued", properties: { sessionID: "ses_1", inboxID: "msg_1" } },
+    ]);
+  });
+
+  test("lifecycle events without a sessionID normalize to nothing", () => {
+    expect(normalizeV2Event({ type: "session.execution.started", data: {} })).toEqual([]);
+    expect(normalizeV2Event({ type: "session.execution.succeeded" })).toEqual([]);
+    expect(normalizeV2Event({})).toEqual([]);
   });
 });
 

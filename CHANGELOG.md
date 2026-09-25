@@ -20,9 +20,21 @@
   untyped tool input is narrowed at runtime and invalid actions return an
   error string instead of throwing. The `@opencode-ai/plugin` dynamic import
   is now V1-only.
+- **V2 event normalization** (`normalizeV2Event`): the V2 stream uses a
+  `data` envelope and different lifecycle names than V1, so events are mapped
+  before reaching the session bridge — `session.execution.started` → busy
+  presence, `session.execution.succeeded`/`failed`/`cancelled` → idle +
+  auto-reply trigger, `session.step.started` → live model label. Shapes
+  verified against a live v2.0.16 event stream.
+- **Model label fix**: `ctx.model.default()` returns a `{ location, data }`
+  envelope; the adapter unwraps `data` before reading `providerID`/`modelID`.
+- **Reload-safe lifecycle**: the process-wide init guard resets when the
+  plugin unloads, when setup fails, or when the plugin is disabled, so OpenCode
+  config-triggered reloads can reinitialize the broker connection; tool/hook
+  registrations are disposed on cleanup.
 - **Cleanup**: `setup()` returns a dispose function that aborts the event
   subscription and releases the broker connection on plugin unload.
-- 52 tests (45 existing + 7 new V2 adapter/setup tests).
+- 58 tests (45 existing + 13 new V2 adapter/normalization/setup tests).
 
 ## 0.2.0 — 2026-09-18
 

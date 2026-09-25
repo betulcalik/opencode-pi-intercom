@@ -67,6 +67,11 @@ init the plugin connects and logs:
   it **switches the session model persistently** (V1 applied it per request).
 - Plugin logs go to `console` (the V2-documented path) instead of
   `client.app.log`.
+- V2 stream events are normalized before reaching the session bridge:
+  `session.execution.started`/`succeeded`/`failed`/`cancelled` drive presence
+  (`thinking`/`idle`) and auto-reply, and `session.step.started` carries the
+  live model label (V1 used `session.idle`, `session.status`, and
+  `message.updated`).
 
 ## Quick start
 
